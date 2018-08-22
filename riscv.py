@@ -386,10 +386,16 @@ class riscv_processor_t(idaapi.processor_t):
         self.op_reg(insn.Op3, self.decode_rs2(opcode))
         funct7 = self.decode_funct7(opcode)
         insn.itype = [
-            self.itype_add, self.itype_sll, self.itype_slt, self.itype_sltu,
-            self.itype_xor, self.itype_slr, self.itype_or, self.itype_and
-        ][self.decode_funct3(opcode)]
-        if funct7 & 0b0100000 == 0b0100000:
+            [
+                self.itype_add, self.itype_sll, self.itype_slt, self.itype_sltu,
+                self.itype_xor, self.itype_slr, self.itype_or, self.itype_and
+            ],
+            [
+                self.itype_mul, self.itype_mulh, self.itype_mulhsu, self.itype_mulhu,
+                self.itype_div, self.itype_divu, self.itype_rem, self.itype_remu
+            ]
+        ][funct7 & 0b1][self.decode_funct3(opcode)]
+        if funct7 & 0b0100001 == 0b0100000:
             if insn.itype == self.itype_add:
                 insn.itype = self.itype_sub
             elif insn.itype == self.itype_slr:
