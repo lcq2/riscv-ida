@@ -32,6 +32,12 @@ RV_OP = 0b0110011
 RV_MISC_MEM = 0b0001111
 RV_SYSTEM = 0b1110011
 RV_AMO = 0b0101111
+RV_LOAD_FP = 0b0000111
+RV_STORE_FP = 0b0100111
+RV_FMADD = 0b1000011
+RV_FMSUB = 0b1000111
+RV_FNMSUB = 0b1001011
+RV_FNMADD = 0b1001111
 
 RV_MAJ_OPCODE_MASK = 0b01111111
 RV_C_MASK = 0b11
@@ -41,6 +47,20 @@ RV_IMM_SIGN_BIT = 0x80000000
 RV_C_IMM_SIGN_BIT = 0x1000
 
 RV_OP_FLAG_SIGNED = 1 << 0
+
+RV_AUX_NOPOST = 0  # no postfix, default for most instructions
+
+RV_AUX_RL = 0x1  # .rl for atomic
+RV_AUX_AQ = 0x2  # .aq for atomic
+
+RV_AUX_W = 1
+RV_AUX_WU = 2
+RV_AUX_D = 3
+RV_AUX_S = 4
+RV_AUX_X = 5
+RV_AUX_L = 6
+RV_AUX_LU = 7
+
 class riscv_processor_t(idaapi.processor_t):
     id = 0x8000 + 0x100
     flag = PR_ASSEMBLE | PR_SEGS | PR_DEFSEG32 | PR_USE32 | PRN_HEX | PR_RNAMESOK | PR_NO_SEGMOVE
@@ -114,18 +134,42 @@ class riscv_processor_t(idaapi.processor_t):
         {'name': 'rem',     'feature': CF_CHG1 | CF_USE2 | CF_USE3},
         {'name': 'remu',    'feature': CF_CHG1 | CF_USE2 | CF_USE3},
 
-        # RV32A
-        {'name': 'lr.w',        'feature': CF_CHG1 | CF_USE2},
-        {'name': 'sc.w',        'feature': CF_CHG1 | CF_USE2},
-        {'name': 'amoswap.w',   'feature': CF_CHG1 | CF_USE1 | CF_USE2},
-        {'name': 'amoadd.w',    'feature': CF_CHG1 | CF_USE1 | CF_USE2},
-        {'name': 'amoxor.w',    'feature': CF_CHG1 | CF_USE1 | CF_USE2},
-        {'name': 'amoand.w',    'feature': CF_CHG1 | CF_USE1 | CF_USE2},
-        {'name': 'amoor.w',     'feature': CF_CHG1 | CF_USE1 | CF_USE2},
-        {'name': 'amomin.w',    'feature': CF_CHG1 | CF_USE1 | CF_USE2},
-        {'name': 'amomax.w',    'feature': CF_CHG1 | CF_USE1 | CF_USE2},
-        {'name': 'amominu.w',   'feature': CF_CHG1 | CF_USE1 | CF_USE2},
-        {'name': 'amomaxu.w',   'feature': CF_CHG1 | CF_USE1 | CF_USE2},
+        # RV32A / RV64A
+        {'name': 'lr',        'feature': CF_CHG1 | CF_USE2},
+        {'name': 'sc',        'feature': CF_CHG1 | CF_USE2},
+        {'name': 'amoswap',   'feature': CF_CHG1 | CF_USE1 | CF_USE2},
+        {'name': 'amoadd',    'feature': CF_CHG1 | CF_USE1 | CF_USE2},
+        {'name': 'amoxor',    'feature': CF_CHG1 | CF_USE1 | CF_USE2},
+        {'name': 'amoand',    'feature': CF_CHG1 | CF_USE1 | CF_USE2},
+        {'name': 'amoor',     'feature': CF_CHG1 | CF_USE1 | CF_USE2},
+        {'name': 'amomin',    'feature': CF_CHG1 | CF_USE1 | CF_USE2},
+        {'name': 'amomax',    'feature': CF_CHG1 | CF_USE1 | CF_USE2},
+        {'name': 'amominu',   'feature': CF_CHG1 | CF_USE1 | CF_USE2},
+        {'name': 'amomaxu',   'feature': CF_CHG1 | CF_USE1 | CF_USE2},
+
+        # RV32F/RV64F/FV32D/RV64D
+        {'name': 'flw',     'feature': CF_CHG1 | CF_USE2},
+        {'name': 'fsw',     'feature': CF_USE1 | CF_CHG2},
+        {'name': 'fmadd',   'feature': CF_CHG1 | CF_USE2 | CF_USE3 | CF_USE4},
+        {'name': 'fmsub',   'feature': CF_CHG1 | CF_USE2 | CF_USE3 | CF_USE4},
+        {'name': 'fnmsub',  'feature': CF_CHG1 | CF_USE2 | CF_USE3 | CF_USE4},
+        {'name': 'fnmadd',  'feature': CF_CHG1 | CF_USE2 | CF_USE3 | CF_USE4},
+        {'name': 'fadd',    'feature': CF_CHG1 | CF_USE2 | CF_USE3},
+        {'name': 'fsub',    'feature': CF_CHG1 | CF_USE2 | CF_USE3},
+        {'name': 'fmul',    'feature': CF_CHG1 | CF_USE2 | CF_USE3},
+        {'name': 'fdiv',    'feature': CF_CHG1 | CF_USE2 | CF_USE3},
+        {'name': 'fsqrt',   'feature': CF_CHG1 | CF_USE2},
+        {'name': 'fsgnj',   'feature': CF_CHG1 | CF_USE2 | CF_USE3},
+        {'name': 'fsgnjn',  'feature': CF_CHG1 | CF_USE2 | CF_USE3},
+        {'name': 'fsgnjx',  'feature': CF_CHG1 | CF_USE2 | CF_USE3},
+        {'name': 'fmin',    'feature': CF_CHG1 | CF_USE2 | CF_USE3},
+        {'name': 'fmax',    'feature': CF_CHG1 | CF_USE2 | CF_USE3},
+        {'name': 'fcvt',    'feature': CF_CHG1 | CF_USE2},
+        {'name': 'fmv',     'feature': CF_CHG1 | CF_USE2},
+        {'name': 'feq',     'feature': CF_CHG1 | CF_USE2 | CF_USE3},
+        {'name': 'flt',     'feature': CF_CHG1 | CF_USE2 | CF_USE3},
+        {'name': 'fle',     'feature': CF_CHG1 | CF_USE2 | CF_USE3},
+        {'name': 'fclass',  'feature': CF_CHG1 | CF_USE2},
 
         # pseudo-instructions
         {'name': 'nop',  'feature': 0},
@@ -217,7 +261,13 @@ class riscv_processor_t(idaapi.processor_t):
             RV_OP: self.decode_OP,
             RV_MISC_MEM: self.decode_MISC_MEM,
             RV_SYSTEM: self.decode_SYSTEM,
-            RV_AMO: self.decode_AMO
+            RV_AMO: self.decode_AMO,
+            RV_STORE_FP: self.decode_STORE_FP,
+            RV_LOAD_FP: self.decode_LOAD_FP,
+            RV_FMADD: self.decode_fmadd,
+            RV_FMSUB: self.decode_fmadd,
+            RV_FNMADD: self.decode_fmadd,
+            RV_FNMSUB: self.decode_fmadd
         }
 
         # compressed integer registers
@@ -236,6 +286,8 @@ class riscv_processor_t(idaapi.processor_t):
             self.ireg_fa4, self.ireg_fa5
         ]
 
+        # available postfixes
+        self.postfixs = ['.w', '.wu', '.d', '.s', '.x', '.l', '.lu']
 
     def imm_sign_extend(self, opcode, imm, bits):
         if opcode & RV_IMM_SIGN_BIT == RV_IMM_SIGN_BIT:
@@ -311,6 +363,12 @@ class riscv_processor_t(idaapi.processor_t):
         op.type = o_displ
         op.reg = base
         op.addr = displ
+
+    def set_postfix1(self, insn, value):
+        insn.auxpref |= (value << 2)
+
+    def set_postfix2(self, insn, value):
+        insn.auxpref |= (value << 6)
 
     def decode_LUI(self, insn, opcode):
         self.op_reg(insn.Op1, self.decode_rd(opcode))
@@ -428,8 +486,86 @@ class riscv_processor_t(idaapi.processor_t):
             self.op_imm(insn.Op3, imm)
 
     def decode_AMO(self, insn, opcode):
-        # TODO
-        pass
+        rd = self.decode_rd(opcode)
+        rs1 = self.decode_rs1(opcode)
+        rs2 = self.decode_rs2(opcode)
+        funct3 = self.decode_funct3(opcode)
+        funct7 = self.decode_funct7(opcode)
+
+        # funct3 = 0b010 for RV32A
+        # funct3 = 0b011 for RV64A
+        # else invalid? not specified in the ISA, assume invalid...
+        if funct3 not in [0b010, 0b011]:
+            return
+
+        # propagate aq/rl suffix to auxpref
+        insn.auxpref |= (funct7 & 0b11)
+
+        # set 32/64 flag
+        if funct3 & 1 == 0:
+            insn.auxpref |= (RV_AUX_W << 2)
+        else:
+            insn.auxpref |= (RV_AUX_D << 2)
+
+        # extract AMO opcode
+        a_opcode = BITS(funct7, 2, 7)
+        insn.itype = {
+            0b00010: self.itype_lr,
+            0b00011: self.itype_sc,
+            0b00001: self.itype_amoswap,
+            0b00000: self.itype_amoadd,
+            0b00100: self.itype_amoxor,
+            0b01100: self.itype_amoand,
+            0b01000: self.itype_amoor,
+            0b10000: self.itype_amomin,
+            0b10100: self.itype_amomax,
+            0b11000: self.itype_amominu,
+            0b11100: self.itype_amomaxu
+        }[a_opcode]
+        self.op_reg(insn.Op1, rd)
+        self.op_displ(insn.Op2, rs1, 0)
+        if rs2 != self.ireg_zero:
+            self.op_reg(insn.Op3, rs2)
+
+    def decode_LOAD_FP(self, insn, opcode):
+        rd = self.decode_rd(opcode)
+        rs1 = self.decode_rs1(opcode)
+        imm = self.decode_i_imm(opcode)
+        funct3 = self.decode_funct3(opcode)
+
+        # fp-regs start at +32 into reg_names array
+        self.op_reg(insn.Op1, rd+32)
+        self.op_displ(insn.Op2, rs1, imm)
+        insn.itype = self.itype_flw if funct3 & 0b1 == 0 else self.itype_fld
+
+    def decode_STORE_FP(self, insn, opcode):
+        rs1 = self.decode_rs1(opcode)
+        rs2 = self.decode_rs2(opcode)
+        imm = self.decode_s_imm(opcode)
+        funct3 = self.decode_funct3(opcode)
+
+        self.op_reg(insn.Op1, rs2+32)
+        self.op_displ(insn.Op2, rs1, imm)
+        insn.itype = self.itype_fsw if funct3 & 0b1 == 0 else self.itype_fsd
+
+    def decode_fmadd(self, insn, opcode):
+        rd = self.decode_rd(opcode)
+        rs1 = self.decode_rs1(opcode)
+        rs2 = self.decode_rs2(opcode)
+        rm = self.decode_funct3(opcode)  # rounding mode
+        rs3 = BITS(opcode, 27, 31)
+        funct2 = BITS(opcode, 25, 26)
+
+        insn.itype = [
+            self.itype_fmadd, self.itype_fmsub, \
+            self.itype_fnmsub, self.itype_fnmadd
+        ][BITS(opcode, 2, 3)]
+        self.set_postfix1(insn, RV_AUX_S if funct2 == 0 else RV_AUX_D)
+
+        self.op_reg(insn.Op1, rd+32)
+        self.op_reg(insn.Op2, rs1+32)
+        self.op_reg(insn.Op3, rs2+32)
+        self.op_reg(insn.Op4, rs3+32)
 
     def decode_compressed(self, insn):
         opcode = insn.get_next_word()
@@ -871,7 +1007,8 @@ class riscv_processor_t(idaapi.processor_t):
         elif optype == o_near:
             ctx.out_name_expr(op, op.addr, BADADDR)
         elif optype == o_displ:
-            ctx.out_value(op, OOF_ADDR | OOFW_16 | OOF_SIGNED)
+            if op.value != 0:
+                ctx.out_value(op, OOF_ADDR | OOFW_32 | OOF_SIGNED)
             ctx.out_symbol('(')
             ctx.out_register(self.reg_names[op.reg])
             ctx.out_symbol(')')
@@ -880,7 +1017,23 @@ class riscv_processor_t(idaapi.processor_t):
         return True
 
     def out_mnem(self, ctx):
-        ctx.out_mnem(8, "")
+        auxpref = ctx.insn.auxpref
+        postfix = ""
+
+        if auxpref != 0:
+            aqrl = BITS(auxpref, 0, 1)  # extract aq/rl pattern (if present)
+            postfix1 = BITS(auxpref, 2, 5)  # extract first postfix
+            postfix2 = BITS(auxpref, 6, 9)  # extract second postfix
+            if postfix1 != 0:
+                postfix = self.postfixs[postfix1-1]
+            if postfix2 != 0:
+                postfix += self.postfixs[postfix2-1]
+            if aqrl & 0b10 == 0b10:
+                postfix += ".aq"
+            if aqrl & 0b01 == 0b01:
+                postfix += ".rl"
+
+        ctx.out_mnem(12, postfix)
 
     def notify_out_insn(self, ctx):
         # nothing special to be done here
@@ -891,7 +1044,7 @@ class riscv_processor_t(idaapi.processor_t):
         if ctx.insn.Op1.type != o_void:
             ctx.out_one_operand(0)
 
-        for i in xrange(1,3):
+        for i in xrange(1,4):
             if ctx.insn[i].type == o_void:
                 break
             ctx.out_symbol(',')
@@ -904,6 +1057,10 @@ class riscv_processor_t(idaapi.processor_t):
         # TODO: check for eventual CPU features in cfg?
         if (insn.ea & 1) != 0:
             return 0
+
+        # some default values
+        insn.auxpref = RV_AUX_NOPOST
+        insn.itype = self.itype_null
 
         # determine if this is a compressed instruction
         # TODO: add support for extended format
