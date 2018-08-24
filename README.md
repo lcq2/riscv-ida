@@ -18,6 +18,7 @@ You need to manually choose RISC-V in the cpu selector when you load a binary. E
 Too much... :D
 
 Soon to come:
+- 64bit support in IDA
 - CSR renaming
 - Data cross reference
 - Better emu
