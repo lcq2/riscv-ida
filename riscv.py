@@ -477,22 +477,27 @@ class riscv_processor_t(idaapi.processor_t):
             insn.itype = self.itype_fencei
 
     def decode_SYSTEM(self, insn, opcode):
-        imm = self.decode_i_imm(opcode, False)
+        rd = self.decode_rd(opcode)
+        imm = self.decode_i_imm(opcode, sign_extend=False)
+        rs1_zimm = self.decode_rs1(opcode)
+
         funct3 = self.decode_funct3(opcode)
         if funct3 == 0:
             if imm & 0b1 == 0b1:
                 insn.itype = self.itype_ebreak
             else:
                 insn.itype = self.itype_ecall
-        elif funct3 < 4:
+        else:
+            insn.itype = [
+                self.itype_csrrw, self.itype_csrrs, self.itype_csrrc,
+                self.itype_csrrwi, self.itype_csrrsi, self.itype_csrrci
+            ][funct3-1]
             self.op_reg(insn.Op1, self.decode_rd(opcode))
-            self.op_reg(insn.Op2, self.decode_rs1(opcode))
-            self.op_imm(insn.Op3, imm)
-            insn.itype = [self.itype_csrrw, self.itype_csrrs, self.itype_csrrc][funct3-1]
-        elif funct3 > 4:
-            self.op_reg(insn.Op1, self.decode_rd(opcode))
-            self.op_imm(insn.Op2, BITS(opcode, 15, 19))
-            self.op_imm(insn.Op3, imm)
+            if funct3 < 3:
+                self.op_reg(insn.Op2, rs1_zimm)
+            else:
+                self.op_imm(insn.Op2, rs1_zimm, signed=False)
+            self.op_imm(insn.Op3, imm, signed=False)
 
     def decode_AMO(self, insn, opcode):
         rd = self.decode_rd(opcode)
