@@ -370,7 +370,8 @@ class riscv_processor_t(idaapi.processor_t):
     def op_displ(self, op, base, displ):
         op.type = o_displ
         op.reg = base
-        op.addr = displ
+        op.value = displ
+        op.dtype = dt_dword
 
     def set_postfix1(self, insn, value):
         insn.auxpref |= (value << 2)
@@ -1068,7 +1069,7 @@ class riscv_processor_t(idaapi.processor_t):
             ctx.out_name_expr(op, op.addr, BADADDR)
         elif optype == o_displ:
             if op.value != 0:
-                ctx.out_value(op, OOF_ADDR | OOFW_32 | OOF_SIGNED)
+                ctx.out_value(op, OOF_OUTER | OOFW_32 | OOF_SIGNED)
             ctx.out_symbol('(')
             ctx.out_register(self.reg_names[op.reg])
             ctx.out_symbol(')')
