@@ -19,6 +19,10 @@ def SIGNEXT(x, b):
     x = x & ((1 << b) - 1)
     return (x ^ m) - m
 
+
+class UnknownInstruction(Exception):
+    pass
+
 # RISC-V major opcodes
 RV_LUI = 0b0110111
 RV_AUIPC = 0b0010111
@@ -38,6 +42,7 @@ RV_FMADD = 0b1000011
 RV_FMSUB = 0b1000111
 RV_FNMSUB = 0b1001011
 RV_FNMADD = 0b1001111
+RV_OP_FP = 0b1010011
 
 RV_MAJ_OPCODE_MASK = 0b01111111
 RV_C_MASK = 0b11
@@ -149,7 +154,9 @@ class riscv_processor_t(idaapi.processor_t):
 
         # RV32F/RV64F/FV32D/RV64D
         {'name': 'flw',     'feature': CF_CHG1 | CF_USE2},
+        {'name': 'fld',     'feature': CF_CHG1 | CF_USE2},
         {'name': 'fsw',     'feature': CF_USE1 | CF_CHG2},
+        {'name': 'fsd',     'feature': CF_USE1 | CF_CHG2},
         {'name': 'fmadd',   'feature': CF_CHG1 | CF_USE2 | CF_USE3 | CF_USE4},
         {'name': 'fmsub',   'feature': CF_CHG1 | CF_USE2 | CF_USE3 | CF_USE4},
         {'name': 'fnmsub',  'feature': CF_CHG1 | CF_USE2 | CF_USE3 | CF_USE4},
@@ -267,7 +274,8 @@ class riscv_processor_t(idaapi.processor_t):
             RV_FMADD: self.decode_fmadd,
             RV_FMSUB: self.decode_fmadd,
             RV_FNMADD: self.decode_fmadd,
-            RV_FNMSUB: self.decode_fmadd
+            RV_FNMSUB: self.decode_fmadd,
+            RV_OP_FP: self.decode_OP_FP
         }
 
         # compressed integer registers
@@ -523,9 +531,11 @@ class riscv_processor_t(idaapi.processor_t):
             0b11100: self.itype_amomaxu
         }[a_opcode]
         self.op_reg(insn.Op1, rd)
-        self.op_displ(insn.Op2, rs1, 0)
-        if rs2 != self.ireg_zero:
-            self.op_reg(insn.Op3, rs2)
+        if insn.itype == self.itype_lr:
+            self.op_displ(insn.Op2, rs1, 0)
+        else:
+            self.op_reg(insn.Op2, rs2)
+            self.op_displ(insn.Op3, rs1, 0)
 
     def decode_LOAD_FP(self, insn, opcode):
         rd = self.decode_rd(opcode)
@@ -566,6 +576,54 @@ class riscv_processor_t(idaapi.processor_t):
         self.op_reg(insn.Op2, rs1+32)
         self.op_reg(insn.Op3, rs2+32)
         self.op_reg(insn.Op4, rs3+32)
+
+    def decode_OP_FP(self, insn, opcode):
+        rd = self.decode_rd(opcode)
+        rs1 = self.decode_rs1(opcode)
+        rs2 = self.decode_rs2(opcode)
+        funct3 = self.decode_funct3(opcode)
+        funct7 = self.decode_funct7(opcode)
+
+        self.op_reg(insn.Op1, rd+32)
+        self.op_reg(insn.Op2, rs1+32)
+
+        sz_postfix = RV_AUX_S if funct7 & 0b11 == 0 else RV_AUX_D
+
+        sel = funct7 >> 2
+        self.set_postfix1(insn, sz_postfix)
+        if sel < 4:
+            insn.itype = [self.itype_fadd, self.itype_fsub, self.itype_fmul, self.itype_fdiv][sel]
+            self.op_reg(insn.Op3, rs2+32)
+        elif sel == 0b01011:
+            insn.itype = self.itype_fsqrt
+        elif sel == 0b00100:
+            insn.itype = [self.itype_fsgnj, self.itype_fsgnjn, self.itype_fsgnjx][funct3]
+            self.op_reg(insn.Op3, rs2+32)
+        elif sel == 0b00101:
+            insn.itype = [self.itype_fmin, self.itype_fmax][funct3]
+            self.op_reg(insn.Op3, rs2+32)
+        elif sel == 0b01000:
+            insn.itype = self.itype_fcvt
+            self.set_postfix2(insn, RV_AUX_S if sz_postfix == RV_AUX_D else RV_AUX_D)
+        elif sel == 0b11000:
+            insn.itype = self.itype_fcvt
+            self.set_postfix1(insn, RV_AUX_W if rs2 == 0 else RV_AUX_WU)
+            self.set_postfix2(insn, sz_postfix)
+        elif sel == 0b11100:
+            insn.itype = [self.itype_fmv, self.itype_fclass][funct3]
+            if funct3 == 0:
+                self.set_postfix1(insn, RV_AUX_X)
+                self.set_postfix2(insn, RV_AUX_W)
+        elif sel == 0b10100:
+            insn.itype = [self.itype_fle, self.itype_flt, self.itype_feq][funct3]
+            self.op_reg(insn.Op3, rs2+32)
+        elif sel == 0b11010:
+            insn.itype = self.itype_fcvt
+            self.set_postfix2(insn, RV_AUX_W if rs2 == 0 else RV_AUX_WU)
+        elif sel == 0b11110:
+            insn.itype = self.itype_fmv
+            self.set_postfix1(insn, RV_AUX_W)
+            self.set_postfix2(insn, RV_AUX_X)
 
     def decode_compressed(self, insn):
         opcode = insn.get_next_word()
@@ -803,8 +861,10 @@ class riscv_processor_t(idaapi.processor_t):
         maj_opcode = BITS(opcode, 0, 6)
         try:
             self.maj_opcodes[maj_opcode](insn, opcode)
+            if insn.size == 0:
+                raise UnknownInstruction()
             return insn.size
-        except KeyError as e:
+        except (KeyError, UnknownInstruction) as e:
             print "error: 0x%08x - %s" % (insn.ea, str(e))
             return 0
 
@@ -1033,7 +1093,7 @@ class riscv_processor_t(idaapi.processor_t):
             if aqrl & 0b01 == 0b01:
                 postfix += ".rl"
 
-        ctx.out_mnem(12, postfix)
+        ctx.out_mnem(14, postfix)
 
     def notify_out_insn(self, ctx):
         # nothing special to be done here
