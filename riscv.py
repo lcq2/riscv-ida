@@ -66,6 +66,9 @@ RV_AUX_X = 5
 RV_AUX_L = 6
 RV_AUX_LU = 7
 
+# csr instruction (some special handling required)
+RV_INSN_CSR = 0x1
+
 class riscv_processor_t(idaapi.processor_t):
     id = 0x8000 + 0x100
     flag = PR_ASSEMBLE | PR_SEGS | PR_DEFSEG32 | PR_USE32 | PRN_HEX | PR_RNAMESOK | PR_NO_SEGMOVE
@@ -122,12 +125,12 @@ class riscv_processor_t(idaapi.processor_t):
         {'name': 'fence.i',  'feature': 0},
         {'name': 'ecall',   'feature': CF_CALL},
         {'name': 'ebreak',  'feature': 0},
-        {'name': 'csrrw',   'feature': CF_CHG1 | CF_USE2 | CF_USE3},
-        {'name': 'csrrs',   'feature': CF_CHG1 | CF_USE2 | CF_USE3},
-        {'name': 'csrrc',   'feature': CF_CHG1 | CF_USE2 | CF_USE3},
-        {'name': 'csrrwi',  'feature': CF_CHG1 | CF_USE2 | CF_USE3},
-        {'name': 'csrrsi',  'feature': CF_CHG1 | CF_USE2 | CF_USE3},
-        {'name': 'csrrci',  'feature': CF_CHG1 | CF_USE2 | CF_USE3},
+        {'name': 'csrrw',   'feature': CF_USE1 | CF_USE2 | CF_USE3},
+        {'name': 'csrrs',   'feature': CF_USE1 | CF_USE2 | CF_USE3},
+        {'name': 'csrrc',   'feature': CF_USE1 | CF_USE2 | CF_USE3},
+        {'name': 'csrrwi',  'feature': CF_USE1 | CF_USE2 | CF_USE3},
+        {'name': 'csrrsi',  'feature': CF_USE1 | CF_USE2 | CF_USE3},
+        {'name': 'csrrci',  'feature': CF_USE1 | CF_USE2 | CF_USE3},
 
         # RV32M
         {'name': 'mul',     'feature': CF_CHG1 | CF_USE2 | CF_USE3},
@@ -199,12 +202,27 @@ class riscv_processor_t(idaapi.processor_t):
         {'name': 'bltz',    'feature': CF_USE1 | CF_USE2 | CF_JUMP},
         {'name': 'bgtz',    'feature': CF_USE1 | CF_USE2 | CF_JUMP},
 
-        # jump/call pseudo-instruction
-        {'name': 'j',   'feature': CF_USE1 | CF_JUMP},
-        {'name': 'jr',  'feature': CF_USE1 | CF_JUMP},
-        {'name': 'ret', 'feature': CF_STOP},
-        {'name': 'call', 'feature': CF_USE1 | CF_CALL},
-        {'name': 'tail', 'feature': CF_USE1 | CF_CALL}
+        # jump/call pseudo-instructions
+        {'name': 'j',       'feature': CF_USE1 | CF_JUMP},
+        {'name': 'jr',      'feature': CF_USE1 | CF_JUMP},
+        {'name': 'ret',     'feature': CF_STOP},
+        {'name': 'call',    'feature': CF_USE1 | CF_CALL},
+        {'name': 'tail',    'feature': CF_USE1 | CF_CALL},
+
+        # csr pseudo-instructions
+        {'name': 'rdinstret',   'feature': CF_CHG1},
+        {'name': 'rdinstreth',  'feature': CF_CHG1},
+        {'name': 'rdcycle',     'feature': CF_CHG1},
+        {'name': 'rdcycleh',    'feature': CF_CHG1},
+        {'name': 'rdtime',      'feature': CF_CHG1},
+        {'name': 'rdtimeh',     'feature': CF_CHG1},
+        {'name': 'csrr',        'feature': CF_CHG1 | CF_USE2},
+        {'name': 'csrw',        'feature': CF_CHG1 | CF_USE2},
+        {'name': 'csrs',        'feature': CF_CHG1 | CF_USE2},
+        {'name': 'csrc',        'feature': CF_CHG1 | CF_USE2},
+        {'name': 'csrwi',       'feature': CF_CHG1 | CF_USE2},
+        {'name': 'csrsi',       'feature': CF_CHG1 | CF_USE2},
+        {'name': 'csrci',       'feature': CF_CHG1 | CF_USE2}
     ]
     instruc_start = 0
     instruc_end = len(instruc) - 1
@@ -296,6 +314,40 @@ class riscv_processor_t(idaapi.processor_t):
 
         # available postfixes
         self.postfixs = ['.w', '.wu', '.d', '.s', '.x', '.l', '.lu']
+
+        # CSRs number:name dict, some entries will be added during initialization
+        # to avoid endless repetition
+        self.csr_names = {
+            # User Trap Setup
+            0x000: 'ustatus',
+            0x004: 'uie',
+            0x005: 'utvec',
+
+            # User Trap Handling
+            0x040: 'uscratch',
+            0x041: 'uepc',
+            0x042: 'ucause',
+            0x043: 'utval',
+            0x044: 'uip',
+
+            # User Floating-Point CSRs
+            0x001: 'fflags',
+            0x002: 'frm',
+            0x003: 'fcsr',
+
+            # User Counter/Timers
+            0xC00: 'cycle',
+            0xC01: 'time',
+            0xC02: 'instret',
+
+            # 0xC03-0xC1F: Performance-monitoring counters (see init_csrs)
+            0xC80: 'cycleh',
+            0xC81: 'timeh',
+            0xC82: 'instreth',
+
+            # 0xC83-0xC9F: Upper 32 bits of hpmcounter[xx], RV32I only
+        }
+        self.init_csrs()
 
     def imm_sign_extend(self, opcode, imm, bits):
         if opcode & RV_IMM_SIGN_BIT == RV_IMM_SIGN_BIT:
@@ -492,12 +544,14 @@ class riscv_processor_t(idaapi.processor_t):
                 self.itype_csrrw, self.itype_csrrs, self.itype_csrrc,
                 self.itype_csrrwi, self.itype_csrrsi, self.itype_csrrci
             ][funct3-1]
+            i = ord(insn.insnpref) | RV_INSN_CSR
+            insn.insnpref = chr(i)
             self.op_reg(insn.Op1, self.decode_rd(opcode))
             if funct3 < 3:
-                self.op_reg(insn.Op2, rs1_zimm)
+                self.op_reg(insn.Op3, rs1_zimm)
             else:
-                self.op_imm(insn.Op2, rs1_zimm, signed=False)
-            self.op_imm(insn.Op3, imm, signed=False)
+                self.op_imm(insn.Op3, rs1_zimm, signed=False)
+            self.op_imm(insn.Op2, imm, signed=False)
 
     def decode_AMO(self, insn, opcode):
         rd = self.decode_rd(opcode)
@@ -955,6 +1009,34 @@ class riscv_processor_t(idaapi.processor_t):
             insn.Op1.assign(insn.Op2)
             insn.Op2.assign(insn.Op3)
             insn.Op3.type = o_void
+        elif ord(insn.insnpref) & RV_INSN_CSR == RV_INSN_CSR:
+            csr = insn.Op2.value
+
+            # these CSRs produce a pseudo-instruction rdXXX
+            if 0xC00 <= csr <= 0xC02 or 0xC80 <= csr <= 0xC82:
+                instrs = ['rdinstret', 'rdcycle', 'rdtime']
+                iname = "itype_" + instrs[csr & 0x00F]
+                if csr & 0x080 == 0x080:
+                    iname += 'h'
+                insn.itype = getattr(self, iname)
+                insn.Op2.type = o_void
+                insn.Op3.type = o_void
+            else:
+                insn.itype = {
+                    self.itype_csrrw: self.itype_csrw,
+                    self.itype_csrrs: self.itype_csrs,
+                    self.itype_csrrc: self.itype_csrc,
+                    self.itype_csrrwi: self.itype_csrwi,
+                    self.itype_csrrsi: self.itype_csrsi,
+                    self.itype_csrrci: self.itype_csrci
+                }[insn.itype]
+
+                if insn.Op3.reg == self.ireg_zero:
+                    insn.Op3.type = o_void
+                elif insn.Op1.reg == self.ireg_zero:
+                    insn.Op1.assign(insn.Op2)
+                    insn.Op2.assign(insn.Op3)
+                    insn.Op3.type = o_void
 
     def handle_operand(self, insn, op, r):
         flags = get_flags(insn.ea)
@@ -1017,6 +1099,10 @@ class riscv_processor_t(idaapi.processor_t):
         self.reg_code_sreg = self.ireg_vCS
         self.reg_data_sreg = self.ireg_vDS
 
+    def init_csrs(self):
+        for i in xrange(3, 32):
+            self.csr_names[0xC00+i] = "hpmcounter%d" % (i)
+            self.csr_names[0xC80+i] = "hpmcounter%dh" % (i)
     # TODO: setup loader hooks and inject correct ELF type
     #def notify_init(self, idp_file):
 
@@ -1066,10 +1152,13 @@ class riscv_processor_t(idaapi.processor_t):
         if optype == o_reg:
             ctx.out_register(self.reg_names[op.reg])
         elif optype == o_imm:
-            opflag = OOFW_IMM | OOFW_32 | OOF_NUMBER
-            if op.specflag1 & RV_OP_FLAG_SIGNED == RV_OP_FLAG_SIGNED:
-                opflag |= OOF_SIGNED
-            ctx.out_value(op, opflag)
+            if ord(ctx.insn.insnpref) & RV_INSN_CSR == RV_INSN_CSR:
+                ctx.out_register(self.csr_names[op.value])
+            else:
+                opflag = OOFW_IMM | OOFW_32 | OOF_NUMBER
+                if op.specflag1 & RV_OP_FLAG_SIGNED == RV_OP_FLAG_SIGNED:
+                    opflag |= OOF_SIGNED
+                ctx.out_value(op, opflag)
         elif optype == o_near:
             ctx.out_name_expr(op, op.addr, BADADDR)
         elif optype == o_displ:
@@ -1126,6 +1215,7 @@ class riscv_processor_t(idaapi.processor_t):
 
         # some default values
         insn.auxpref = RV_AUX_NOPOST
+        insn.insnpref = ''
         insn.itype = self.itype_null
 
         # determine if this is a compressed instruction
