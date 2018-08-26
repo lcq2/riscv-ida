@@ -19,7 +19,6 @@ Too much... :D
 
 Soon to come:
 - 64bit support in IDA
-- CSR renaming
 - Data cross reference
 - Better emu
 - Better integration with ELF loader (no more Unrecognized cpu blabla)
