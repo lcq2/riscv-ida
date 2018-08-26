@@ -1,6 +1,8 @@
-import sys
-import idaapi
 from idaapi import *
+
+# keeping __EA64__ name for historical reasons
+__EA64__ = BADADDR == 0xFFFFFFFFFFFFFFFF
+
 
 def fix_sign_32(l):
     l &= 0xFFFFFFFF
@@ -8,11 +10,14 @@ def fix_sign_32(l):
         l -= 0x100000000
     return l
 
+
 def BITS(val, low, high):
     return (val >> low) & ((1 << (high - low + 1)) - 1)
 
+
 def BIT(val, bit):
     return (val >> bit) & 1
+
 
 def SIGNEXT(x, b):
     m = 1 << (b - 1)
@@ -20,8 +25,13 @@ def SIGNEXT(x, b):
     return (x ^ m) - m
 
 
+def is_reg(op, regNo):
+    return op.reg == regNo
+
+
 class UnknownInstruction(Exception):
     pass
+
 
 # RISC-V major opcodes
 RV_LUI = 0b0110111
@@ -69,7 +79,8 @@ RV_AUX_LU = 7
 # csr instruction (some special handling required)
 RV_INSN_CSR = 0x1
 
-class riscv_processor_t(idaapi.processor_t):
+
+class riscv_processor_t(processor_t):
     id = 0x8000 + 0x100
     flag = PR_ASSEMBLE | PR_SEGS | PR_DEFSEG32 | PR_USE32 | PRN_HEX | PR_RNAMESOK | PR_NO_SEGMOVE
     cnbits = 8
@@ -131,6 +142,20 @@ class riscv_processor_t(idaapi.processor_t):
         {'name': 'csrrwi',  'feature': CF_USE1 | CF_USE2 | CF_USE3},
         {'name': 'csrrsi',  'feature': CF_USE1 | CF_USE2 | CF_USE3},
         {'name': 'csrrci',  'feature': CF_USE1 | CF_USE2 | CF_USE3},
+
+        # RV64I
+        {'name': 'lwu',     'feature': CF_CHG1 | CF_USE2},
+        {'name': 'ld',      'feature': CF_CHG1 | CF_USE2},
+        {'name': 'sd',      'feature': CF_USE1 | CF_CHG2},
+        {'name': 'addiw',   'feature': CF_CHG1 | CF_USE2 | CF_USE3},
+        {'name': 'slliw',   'feature': CF_CHG1 | CF_USE2 | CF_USE3},
+        {'name': 'srliw',   'feature': CF_CHG1 | CF_USE2 | CF_USE3},
+        {'name': 'sraiw',   'feature': CF_CHG1 | CF_USE2 | CF_USE3},
+        {'name': 'addw',    'feature': CF_CHG1 | CF_USE2 | CF_USE3},
+        {'name': 'subw',    'feature': CF_CHG1 | CF_USE2 | CF_USE3},
+        {'name': 'sllw',    'feature': CF_CHG1 | CF_USE2 | CF_USE3},
+        {'name': 'srlw',    'feature': CF_CHG1 | CF_USE2 | CF_USE3},
+        {'name': 'sraw',    'feature': CF_CHG1 | CF_USE2 | CF_USE3},
 
         # RV32M
         {'name': 'mul',     'feature': CF_CHG1 | CF_USE2 | CF_USE3},
@@ -272,45 +297,11 @@ class riscv_processor_t(idaapi.processor_t):
         self.PTRSZ = 4
         self.init_instructions()
         self.init_registers()
-
-        # main decoder, dispatches decoding depending on major opcode
-        self.maj_opcodes = {
-            RV_LUI: self.decode_LUI,
-            RV_AUIPC: self.decode_AUIPC,
-            RV_JAL: self.decode_JAL,
-            RV_JALR: self.decode_JALR,
-            RV_BRANCH: self.decode_BRANCH,
-            RV_LOAD: self.decode_LOAD,
-            RV_STORE: self.decode_STORE,
-            RV_IMM: self.decode_IMM,
-            RV_OP: self.decode_OP,
-            RV_MISC_MEM: self.decode_MISC_MEM,
-            RV_SYSTEM: self.decode_SYSTEM,
-            RV_AMO: self.decode_AMO,
-            RV_STORE_FP: self.decode_STORE_FP,
-            RV_LOAD_FP: self.decode_LOAD_FP,
-            RV_FMADD: self.decode_fmadd,
-            RV_FMSUB: self.decode_fmadd,
-            RV_FNMADD: self.decode_fmadd,
-            RV_FNMSUB: self.decode_fmadd,
-            RV_OP_FP: self.decode_OP_FP
-        }
-
-        # compressed integer registers
-        self.ciregs = [
-            self.ireg_s0, self.ireg_s1,
-            self.ireg_a0, self.ireg_a1,
-            self.ireg_a2, self.ireg_a3,
-            self.ireg_a4, self.ireg_a5
-        ]
-
-        # compressed floating point registers
-        self.cfregs = [
-            self.ireg_fs0, self.ireg_fs1,
-            self.ireg_fa0, self.ireg_fa1,
-            self.ireg_fa2, self.ireg_fa3,
-            self.ireg_fa4, self.ireg_fa5
-        ]
+        self.init_tables()
+        if __EA64__:
+            print "64bit\n"
+        else:
+            print "32bit"
 
         # available postfixes
         self.postfixs = ['.w', '.wu', '.d', '.s', '.x', '.l', '.lu']
@@ -402,9 +393,10 @@ class riscv_processor_t(idaapi.processor_t):
         funct7 = BITS(opcode, 25, 31)
         return funct7
 
-    def op_reg(self, op, regNo):
+    def op_reg(self, op, regNo, dtype=dt_dword):
         op.type = o_reg
         op.reg = regNo
+        op.dtype = dtype
 
     def op_imm(self, op, imm, signed=True):
         op.type = o_imm
@@ -419,11 +411,11 @@ class riscv_processor_t(idaapi.processor_t):
         op.addr = addr
         op.dtype = dt_code
 
-    def op_displ(self, op, base, displ):
+    def op_displ(self, op, base, displ, dtype=dt_dword):
         op.type = o_displ
         op.reg = base
         op.value = displ
-        op.dtype = dt_dword
+        op.dtype = dtype
 
     def set_postfix1(self, insn, value):
         insn.auxpref |= (value << 2)
@@ -465,20 +457,25 @@ class riscv_processor_t(idaapi.processor_t):
 
 
     def decode_LOAD(self, insn, opcode):
+        funct3 = self.decode_funct3(opcode)
+        optbl = [
+            [self.itype_lb, dt_byte], [self.itype_lh, dt_word],
+            [self.itype_lw, dt_dword], [self.itype_ld, dt_qword],
+            [self.itype_lbu, dt_byte], [self.itype_lhu, dt_word], [self.itype_lwu, dt_dword]
+        ]
+        insn.itype = optbl[funct3][0]
         self.op_reg(insn.Op1, self.decode_rd(opcode))
-        self.op_displ(insn.Op2, self.decode_rs1(opcode), self.decode_i_imm(opcode))
-        insn.itype = [
-            self.itype_lb, self.itype_lh,
-            self.itype_lw, 0,
-            self.itype_lbu, self.itype_lhu
-        ][self.decode_funct3(opcode)]
+        self.op_displ(insn.Op2, self.decode_rs1(opcode), self.decode_i_imm(opcode), optbl[funct3][1])
 
     def decode_STORE(self, insn, opcode):
+        funct3 = self.decode_funct3(opcode)
+        optbl = [
+            [self.itype_sb, dt_byte], [self.itype_sh, dt_word], [self.itype_sw, dt_dword],
+            [self.itype_sd, dt_qword]
+        ]
         self.op_reg(insn.Op1, self.decode_rs2(opcode))
-        self.op_displ(insn.Op2, self.decode_rs1(opcode), self.decode_s_imm(opcode))
-        insn.itype = [
-            self.itype_sb, self.itype_sh, self.itype_sw
-        ][self.decode_funct3(opcode)]
+        self.op_displ(insn.Op2, self.decode_rs1(opcode), self.decode_s_imm(opcode), optbl[funct3][1])
+        insn.itype = optbl[funct3][0]
 
     def decode_IMM(self, insn, opcode):
         self.op_reg(insn.Op1, self.decode_rd(opcode))
@@ -553,6 +550,7 @@ class riscv_processor_t(idaapi.processor_t):
                 self.op_imm(insn.Op3, rs1_zimm, signed=False)
             self.op_imm(insn.Op2, imm, signed=False)
 
+
     def decode_AMO(self, insn, opcode):
         rd = self.decode_rd(opcode)
         rs1 = self.decode_rs1(opcode)
@@ -570,10 +568,7 @@ class riscv_processor_t(idaapi.processor_t):
         insn.auxpref |= (funct7 & 0b11)
 
         # set 32/64 flag
-        if funct3 & 1 == 0:
-            insn.auxpref |= (RV_AUX_W << 2)
-        else:
-            insn.auxpref |= (RV_AUX_D << 2)
+        self.set_postfix1(insn, RV_AUX_W if funct3 & 1 == 0 else RV_AUX_D)
 
         # extract AMO opcode
         a_opcode = BITS(funct7, 2, 7)
@@ -613,10 +608,12 @@ class riscv_processor_t(idaapi.processor_t):
         rs2 = self.decode_rs2(opcode)
         imm = self.decode_s_imm(opcode)
         funct3 = self.decode_funct3(opcode)
+        isfloat = (funct3 & 0b1) == 0
+        dtype = dt_float if isfloat else dt_double
 
-        self.op_reg(insn.Op1, rs2+32)
-        self.op_displ(insn.Op2, rs1, imm)
-        insn.itype = self.itype_fsw if funct3 & 0b1 == 0 else self.itype_fsd
+        self.op_reg(insn.Op1, rs2+32, dtype)
+        self.op_displ(insn.Op2, rs1, imm, dtype)
+        insn.itype = self.itype_fsw if isfloat else self.itype_fsd
 
     def decode_fmadd(self, insn, opcode):
         rd = self.decode_rd(opcode)
@@ -643,47 +640,89 @@ class riscv_processor_t(idaapi.processor_t):
         rs2 = self.decode_rs2(opcode)
         funct3 = self.decode_funct3(opcode)
         funct7 = self.decode_funct7(opcode)
+        isfloat = (funct7 & 0b11) == 0
+        dtype = dt_float if isfloat else dt_double
 
-        self.op_reg(insn.Op1, rd+32)
-        self.op_reg(insn.Op2, rs1+32)
-
-        sz_postfix = RV_AUX_S if funct7 & 0b11 == 0 else RV_AUX_D
+        sz_postfix = RV_AUX_S if isfloat else RV_AUX_D
 
         sel = funct7 >> 2
-        self.set_postfix1(insn, sz_postfix)
+        postfix1 = sz_postfix
+        postfix2 = 0
+
         if sel < 4:
+            # fadd, fsub, fmul, fdiv
             insn.itype = [self.itype_fadd, self.itype_fsub, self.itype_fmul, self.itype_fdiv][sel]
-            self.op_reg(insn.Op3, rs2+32)
+            self.op_reg(insn.Op1, rd + 32, dtype)
+            self.op_reg(insn.Op2, rs1 + 32, dtype)
+            self.op_reg(insn.Op3, rs2 + 32, dtype)
         elif sel == 0b01011:
+            # fsqrt
             insn.itype = self.itype_fsqrt
+            self.op_reg(insn.Op1, rd + 32, dtype)
+            self.op_reg(insn.Op2, rs1 + 32, dtype)
         elif sel == 0b00100:
+            # fsgnj, fsgnjn, fsgnjx
             insn.itype = [self.itype_fsgnj, self.itype_fsgnjn, self.itype_fsgnjx][funct3]
-            self.op_reg(insn.Op3, rs2+32)
-        elif sel == 0b00101:
-            insn.itype = [self.itype_fmin, self.itype_fmax][funct3]
-            self.op_reg(insn.Op3, rs2+32)
-        elif sel == 0b01000:
-            insn.itype = self.itype_fcvt
-            self.set_postfix2(insn, RV_AUX_S if sz_postfix == RV_AUX_D else RV_AUX_D)
-        elif sel == 0b11000:
-            insn.itype = self.itype_fcvt
-            self.set_postfix1(insn, RV_AUX_W if rs2 == 0 else RV_AUX_WU)
-            self.set_postfix2(insn, sz_postfix)
-        elif sel == 0b11100:
-            insn.itype = [self.itype_fmv, self.itype_fclass][funct3]
-            if funct3 == 0:
-                self.set_postfix1(insn, RV_AUX_X)
-                self.set_postfix2(insn, RV_AUX_W)
+            self.op_reg(insn.Op1, rd + 32, dtype)
+            self.op_reg(insn.Op2, rs1 + 32, dtype)
+            self.op_reg(insn.Op3, rs2 + 32, dtype)
         elif sel == 0b10100:
+            # feq, flt, fle
             insn.itype = [self.itype_fle, self.itype_flt, self.itype_feq][funct3]
-            self.op_reg(insn.Op3, rs2+32)
-        elif sel == 0b11010:
+            self.op_reg(insn.Op1, rd, dt_qword if __EA64__ else dt_dword)
+            self.op_reg(insn.Op2, rs1 + 32, dtype)
+            self.op_reg(insn.Op3, rs2 + 32, dtype)
+        elif sel == 0b01000:
+            # fcvt[.s|.d][.d|.s]
+            if rs2 == 0 or rs2 == 1:
+                optbl = [[RV_AUX_S, dt_float], [RV_AUX_D, dt_double]]
+                insn.itype = self.itype_fcvt
+                postfix2 = optbl[rs2][0]
+                self.op_reg(insn.Op1, rd + 32, dtype)
+                self.op_reg(insn.Op2, rs1 + 32, optbl[rs2][1])
+        elif sel == 0b00101:
+            # fmin, fmax
+            insn.itype = [self.itype_fmin, self.itype_fmax][funct3]
+            self.op_reg(insn.Op1, rd + 32, dtype)
+            self.op_reg(insn.Op2, rs1 + 32, dtype)
+            self.op_reg(insn.Op3, rs2 + 32, dtype)
+        elif sel == 0b11010 or sel == 0b11000:
+            cvtsel = BIT(sel, 1)
+            # fcvt[.w|.wu|.l|.lu][.s] or fcvt[.s][.w|.wu|.l|.lu]
+            optbl = [[RV_AUX_W, dt_dword], [RV_AUX_WU, dt_dword], [RV_AUX_L, dt_qword], [RV_AUX_LU, dt_qword]]
+            cvttbl = [
+                [rd, rs1+32, optbl[rs2][1], dtype, optbl[rs2][0], sz_postfix],
+                [rd+32, rs1, dtype, optbl[rs2][1], sz_postfix, optbl[rs2][0]]
+            ]
             insn.itype = self.itype_fcvt
-            self.set_postfix2(insn, RV_AUX_W if rs2 == 0 else RV_AUX_WU)
-        elif sel == 0b11110:
-            insn.itype = self.itype_fmv
-            self.set_postfix1(insn, RV_AUX_W)
-            self.set_postfix2(insn, RV_AUX_X)
+            self.op_reg(insn.Op1, cvttbl[cvtsel][0], cvttbl[cvtsel][2])
+            self.op_reg(insn.Op2, cvttbl[cvtsel][1], cvttbl[cvtsel][3])
+            postfix1 = cvttbl[cvtsel][4]
+            postfix2 = cvttbl[cvtsel][5]
+        elif sel == 0b11110 or sel == 0b11100:
+            cvtsel = BIT(sel, 1)
+            if funct3 == 1:
+                if cvtsel == 0:
+                    # fclass
+                    insn.itype = self.itype_fclass
+                    self.op_reg(insn.Op1, rd, dt_qword if __EA64__ else dt_dword)
+                    self.op_reg(insn.Op2, rs1 + 32, dtype)
+            else:
+                # fmv[.w|.d][.x] or fmv[.x][.w|.d]
+                insn.itype = self.itype_fmv
+                if cvtsel == 0:
+                    self.op_reg(insn.Op1, rd, dt_qword if __EA64__ else dt_dword)
+                    self.op_reg(insn.Op2, rs1+32, dtype)
+                    postfix1 = RV_AUX_X
+                    postfix2 = RV_AUX_W if dtype == dt_float else RV_AUX_D
+                else:
+                    self.op_reg(insn.Op1, rd+32, dtype)
+                    self.op_reg(insn.Op2, rs1, dt_qword if __EA64__ else dt_dword)
+                    postfix1 = RV_AUX_W if dtype == dt_float else RV_AUX_D
+                    postfix2 = RV_AUX_X
+
+        self.set_postfix1(insn, postfix1)
+        self.set_postfix2(insn, postfix2)
 
     def decode_compressed(self, insn):
         opcode = insn.get_next_word()
@@ -711,43 +750,21 @@ class riscv_processor_t(idaapi.processor_t):
         if q == 0:
             rs1 = BITS(opcode, 7, 9)
             rd_rs2 = BITS(opcode, 2, 4)
-            if copcode == 0:
+            if copcode != 0:
+                # a lookup table is used for compressed load/store
+                # they make up most of compressed instructions in an average executable
+                decoder = self.c_q0[copcode-1]
+                if decoder[0] != self.itype_null:
+                    insn.itype = decoder[0]
+                    self.op_reg(insn.Op1, decoder[2][rd_rs2])
+                    self.op_displ(insn.Op2, self.ciregs[rs1], decoder[1](opcode))
+            else:
                 insn.itype = self.itype_addi
                 imm = (BIT(opcode, 5) << 3) | (BIT(opcode, 6) << 2) | \
                       (BITS(opcode, 7, 10) << 6) | (BITS(opcode, 11, 12) << 4)
                 self.op_reg(insn.Op1, self.ciregs[rd_rs2])
                 self.op_reg(insn.Op2, self.ireg_sp)
                 self.op_imm(insn.Op3, imm)
-            elif copcode == 0b001:
-                imm = (BITS(opcode, 10, 12) << 3) | (BITS(opcode, 5, 6) << 6)
-                self.op_reg(insn.Op1, self.cfregs[rd_rs2])
-                self.op_displ(insn.Op2, self.ciregs[rs1], imm)
-                insn.itype = self.itype_fld
-            elif copcode == 0b010:
-                imm = (BIT(opcode, 6) << 2) | (BITS(opcode, 10, 12) << 3) | (BIT(opcode, 5) << 6)
-                self.op_reg(insn.Op1, self.ciregs[rd_rs2])
-                self.op_displ(insn.Op2, self.ciregs[rs1], imm)
-                insn.itype = self.itype_lw
-            elif copcode == 0b011:
-                imm = (BIT(opcode, 6) << 2) | (BITS(opcode, 10, 12) << 3) | (BIT(opcode, 5) << 6)
-                self.op_reg(insn.Op1, self.cfregs[rd_rs2])
-                self.op_displ(insn.Op2, self.ciregs[rs1], imm)
-                insn.itype = self.itype_flw
-            elif copcode == 0b101:
-                imm = (BITS(opcode, 10, 12) << 3) | (BITS(opcode, 5, 6) << 6)
-                self.op_reg(insn.Op1, self.cfregs[rd_rs2])
-                self.op_displ(insn.Op2, self.ciregs[rs1], imm)
-                insn.itype = self.itype_fsd
-            elif copcode == 0b110:
-                imm = (BIT(opcode, 5) << 6) | (BIT(opcode, 6) << 2) | (BITS(opcode, 10, 12) << 3)
-                self.op_reg(insn.Op1, self.ciregs[rd_rs2])
-                self.op_displ(insn.Op2, self.ciregs[rs1], imm)
-                insn.itype = self.itype_sw
-            elif copcode == 0b111:
-                imm = (BIT(opcode, 6) << 2) | (BITS(opcode, 10, 12) << 3) | (BIT(opcode, 5) << 6)
-                self.op_reg(insn.Op1, self.cfregs[rd_rs2])
-                self.op_displ(insn.Op2, self.ciregs[rs1], imm)
-                insn.itype = self.itype_fsw
         elif q == 1:
             rs1_rd = BITS(opcode, 7, 9)
             rs2 = BITS(opcode, 2, 4)
@@ -804,25 +821,15 @@ class riscv_processor_t(idaapi.processor_t):
                     imm = SIGNEXT(imm, 6)
                 sel1 = BITS(opcode, 10, 11)
                 sel2 = BITS(opcode, 5, 6)
-                if sel1 == 0b00:
-                    self.op_reg(insn.Op1, self.ciregs[rs1_rd])
-                    self.op_reg(insn.Op2, self.ciregs[rs1_rd])
-                    self.op_imm(insn.Op3, imm & 0b11111 if imm != 0 else 64)
-                    insn.itype = self.itype_srli
-                elif sel1 == 0b01:
-                    self.op_reg(insn.Op1, self.ciregs[rs1_rd])
-                    self.op_reg(insn.Op2, self.ciregs[rs1_rd])
-                    self.op_imm(insn.Op3, imm & 0b11111 if imm != 0 else 64)
-                    insn.itype = self.itype_srai
-                elif sel1 == 0b10:
-                    insn.itype = self.itype_andi
-                    self.op_reg(insn.Op1, self.ciregs[rs1_rd])
-                    self.op_reg(insn.Op2, self.ciregs[rs1_rd])
+                self.op_reg(insn.Op1, self.ciregs[rs1_rd])
+                self.op_reg(insn.Op2, self.ciregs[rs1_rd])
+                if sel1 < 3:
+                    insn.itype = [self.itype_srli, self.itype_srai, self.itype_andi][sel1]
+                    if sel1 < 2:
+                        imm = imm & 0b11111 if imm != 0 else 64
                     self.op_imm(insn.Op3, imm)
                 elif sel1 == 0b11:
                     insn.itype =[self.itype_sub, self.itype_xor, self.itype_or, self.itype_and][sel2]
-                    self.op_reg(insn.Op1, self.ciregs[rs1_rd])
-                    self.op_reg(insn.Op2, self.ciregs[rs1_rd])
                     self.op_reg(insn.Op3, self.ciregs[rs2])
                     if BIT(opcode, 12) == 1:
                         if insn.itype == self.itype_sub:
@@ -1085,8 +1092,6 @@ class riscv_processor_t(idaapi.processor_t):
             'fa2', 'fa3', 'fa4', 'fa5', 'fa6', 'fa7',
             'fs2', 'fs3', 'fs4', 'fs5', 'fs6', 'fs7', 'fs8', 'fs9', 'fs10', 'fs11',
             'ft8', 'ft9', 'ft10', 'ft11',
-            'csr',
-            'fcsr',
             'vCS',  # fake cs
             'vDS'  # fake ds
         ]
@@ -1099,10 +1104,79 @@ class riscv_processor_t(idaapi.processor_t):
         self.reg_code_sreg = self.ireg_vCS
         self.reg_data_sreg = self.ireg_vDS
 
+        # compressed integer registers
+        self.ciregs = [
+            self.ireg_s0, self.ireg_s1,
+            self.ireg_a0, self.ireg_a1,
+            self.ireg_a2, self.ireg_a3,
+            self.ireg_a4, self.ireg_a5
+        ]
+
+        # compressed floating point registers
+        self.cfregs = [
+            self.ireg_fs0, self.ireg_fs1,
+            self.ireg_fa0, self.ireg_fa1,
+            self.ireg_fa2, self.ireg_fa3,
+            self.ireg_fa4, self.ireg_fa5
+        ]
+
     def init_csrs(self):
         for i in xrange(3, 32):
             self.csr_names[0xC00+i] = "hpmcounter%d" % (i)
             self.csr_names[0xC80+i] = "hpmcounter%dh" % (i)
+
+    # initializes some decoding tables to speedup decoding a bit (only for some frequent instructions)
+    def init_tables(self):
+
+        # main decoder, dispatches decoding depending on major opcode
+        self.maj_opcodes = {
+            RV_LUI: self.decode_LUI,
+            RV_AUIPC: self.decode_AUIPC,
+            RV_JAL: self.decode_JAL,
+            RV_JALR: self.decode_JALR,
+            RV_BRANCH: self.decode_BRANCH,
+            RV_LOAD: self.decode_LOAD,
+            RV_STORE: self.decode_STORE,
+            RV_IMM: self.decode_IMM,
+            RV_OP: self.decode_OP,
+            RV_MISC_MEM: self.decode_MISC_MEM,
+            RV_SYSTEM: self.decode_SYSTEM,
+            RV_AMO: self.decode_AMO,
+            RV_STORE_FP: self.decode_STORE_FP,
+            RV_LOAD_FP: self.decode_LOAD_FP,
+            RV_FMADD: self.decode_fmadd,
+            RV_FMSUB: self.decode_fmadd,
+            RV_FNMADD: self.decode_fmadd,
+            RV_FNMSUB: self.decode_fmadd,
+            RV_OP_FP: self.decode_OP_FP
+        }
+
+        # compressed instructions for load and store, quadrant 0
+        # format: [itype, decode_immediate(..), reg_list]
+        # these are the most common compressed instructions
+        self.c_q0 = [
+            # 001
+            [self.itype_fld, lambda opcode: (BITS(opcode, 10, 12) << 3) | (BITS(opcode, 5, 6) << 6),
+                self.cfregs],
+            # 010
+            [self.itype_lw, lambda opcode: (BIT(opcode, 6) << 2) | (BITS(opcode, 10, 12) << 3) | (BIT(opcode, 5) << 6),
+                self.ciregs],
+            # 011
+            [self.itype_flw, lambda opcode: (BIT(opcode, 6) << 2) | (BITS(opcode, 10, 12) << 3) | (BIT(opcode, 5) << 6),
+                self.cfregs],
+            # 100
+            [self.itype_null, None, None],
+            # 101
+            [self.itype_fsd, lambda opcode: (BITS(opcode, 10, 12) << 3) | (BITS(opcode, 5, 6) << 6),
+                self.cfregs],
+            # 110
+            [self.itype_sw, lambda opcode: (BIT(opcode, 5) << 6) | (BIT(opcode, 6) << 2) | (BITS(opcode, 10, 12) << 3),
+                self.ciregs],
+            # 111
+            [self.itype_fsw, lambda opcode: (BIT(opcode, 6) << 2) | (BITS(opcode, 10, 12) << 3) | (BIT(opcode, 5) << 6),
+                self.cfregs]
+        ]
+
     # TODO: setup loader hooks and inject correct ELF type
     #def notify_init(self, idp_file):
 
