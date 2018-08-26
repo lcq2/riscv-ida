@@ -1,7 +1,9 @@
 AS=riscv32-unknown-elf-as
+CC=riscv32-unknown-elf-gcc
 OBJCOPY=riscv32-unknown-elf-objcopy
-OBJ=test_RV32A.o test_RV32F_RV32D.o
+OBJ=test_RV32I.o test_RV32A.o test_RV32F_RV32D.o
 BIN=test_RV32A.bin test_RV32F_RV32D.bin
+ELF=test_RV32I.elf
 
 %.o: %.s
 	$(AS) -o $@ $<
@@ -9,9 +11,13 @@ BIN=test_RV32A.bin test_RV32F_RV32D.bin
 %.bin: %.o
 	$(OBJCOPY) -O binary $< $@
 
-test: $(BIN)
+%.elf: %.o
+	$(CC) -nostdlib -o $@ $<
+	chmod -x $@
+
+test: $(BIN) $(ELF)
 
 .PHONY: clean
 
 clean:
-	rm -f *.bin *.o
+	rm -f *.bin *.o *.elf
