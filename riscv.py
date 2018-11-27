@@ -337,6 +337,33 @@ class riscv_processor_t(processor_t):
             0xC82: 'instreth',
 
             # 0xC83-0xC9F: Upper 32 bits of hpmcounter[xx], RV32I only
+
+            # Machine Trap Setup
+            0x300: 'mstatus',
+            0x301: 'misa',
+            0x302: 'medeleg',
+            0x303: 'mideleg',
+            0x304: 'mie',
+            0x305: 'mtvec',
+            0x306: 'mcounteren',
+
+            # Machine Trap Handling
+            0x340: 'mscratch',
+            0x341: 'mepc',
+            0x342: 'mcause',
+            0x343: 'mtval',
+            0x344: 'mip',
+
+            # Machine Counters / Timers
+            0xB00: 'mcycle',
+            0xB02: 'minstret',
+
+            # Machine Information Registers
+            0xF11: 'mvendorid',
+            0xF12: 'marchid',
+            0xF13: 'mimpid',
+            0xF14: 'mhartid',
+
         }
         self.init_csrs()
 
